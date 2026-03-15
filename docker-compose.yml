@@ -95,6 +95,8 @@ services:
       DB_NAME: gateway_db
       SPRING_R2DBC_USERNAME: gateway_user
       SPRING_R2DBC_PASSWORD: gateway_pass
+      JWT_SECRET: my-super-secret-key-that-is-at-least-32-chars-long
+      JWT_EXPIRATION: 3600000
     networks:
       - gateway-network
     depends_on:

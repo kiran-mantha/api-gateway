@@ -11,6 +11,8 @@ import org.springframework.beans.factory.annotation.Value;
 public class RouteConfig {
 
     // Service URIs — in production these come from @Value / config server
+    @Value("${services.gateway.uri}")
+    private String gatewayUri;
     @Value("${services.user-service.uri}")
     private String userServiceUri;
     @Value("${services.order-service.uri}")
@@ -20,6 +22,14 @@ public class RouteConfig {
     public RouteLocator gatewayRoutes(RouteLocatorBuilder builder) {
         return builder.routes()
 
+            .route("auth-route", r -> r
+                .path("/api/auth/**")
+                .filters(f -> f
+                    .addResponseHeader("X-Served-By", "gateway-auth")
+                )
+                .uri("http://localhost:8080")
+            )
+
             // ── User Service ──────────────────────────────────────
             .route("user-service-route", r -> r
                 .path("/api/users/**")
@@ -28,7 +38,6 @@ public class RouteConfig {
                 .filters(f -> f
                     .addResponseHeader("X-Served-By", "user-service")
                     .addRequestHeader("X-Gateway-Request", "true")
-                    // We'll plug AuthFilter and RateLimitFilter here next session
                 )
                 .uri(userServiceUri)
             )

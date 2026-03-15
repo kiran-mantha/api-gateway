@@ -34,7 +34,13 @@ management:
       enabled: true 
 
 services:
+  gateway:
+    uri: ${GATEWAY_URI:http://localhost:8080}
   user-service:
     uri: ${USER_SERVICE_URI:http://localhost:8081}
   order-service:
     uri: ${ORDER_SERVICE_URI:http://localhost:8082}
+
+jwt:
+  secret: ${JWT_SECRET:my-super-secret-key-that-is-at-least-32-chars}
+  expiration: ${JWT_EXPIRATION:3600000} # 1 hour in milliseconds
