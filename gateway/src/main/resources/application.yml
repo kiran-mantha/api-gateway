@@ -1,0 +1,32 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+
+  # Redis connection
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: 2000ms
+
+  # R2DBC (reactive PostgreSQL)
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:5432/gatewaydb
+    username: ${SPRING_R2DBC_USERNAME:postgres}
+    password: ${SPRING_R2DBC_PASSWORD:root}
+    pool:
+      initial-size: 2
+      max-size: 10
+
+# Expose health endpoint for Docker healthcheck
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  endpoint:
+    health:
+      show-details: always
