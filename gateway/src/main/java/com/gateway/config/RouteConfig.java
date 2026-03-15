@@ -5,13 +5,16 @@ import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.beans.factory.annotation.Value;
 
 @Configuration
 public class RouteConfig {
 
     // Service URIs — in production these come from @Value / config server
-    private static final String USER_SERVICE_URI  = "http://user-service:8081";
-    private static final String ORDER_SERVICE_URI = "http://order-service:8082";
+    @Value("${services.user-service.uri}")
+    private String userServiceUri;
+    @Value("${services.order-service.uri}")
+    private String orderServiceUri;
 
     @Bean
     public RouteLocator gatewayRoutes(RouteLocatorBuilder builder) {
@@ -27,7 +30,7 @@ public class RouteConfig {
                     .addRequestHeader("X-Gateway-Request", "true")
                     // We'll plug AuthFilter and RateLimitFilter here next session
                 )
-                .uri(USER_SERVICE_URI)
+                .uri(userServiceUri)
             )
 
             // ── Order Service ─────────────────────────────────────
@@ -39,7 +42,7 @@ public class RouteConfig {
                     .addResponseHeader("X-Served-By", "order-service")
                     .addRequestHeader("X-Gateway-Request", "true")
                 )
-                .uri(ORDER_SERVICE_URI)
+                .uri(orderServiceUri)
             )
 
             .build();

@@ -14,7 +14,7 @@ spring:
 
   # R2DBC (reactive PostgreSQL)
   r2dbc:
-    url: r2dbc:postgresql://${DB_HOST:localhost}:5432/gatewaydb
+    url: r2dbc:postgresql://${DB_HOST:localhost}:5432/${DB_NAME:gateway_db}
     username: ${SPRING_R2DBC_USERNAME:postgres}
     password: ${SPRING_R2DBC_PASSWORD:root}
     pool:
@@ -29,4 +29,12 @@ management:
         include: "*"
   endpoint:
     health:
-      show-details: always
+      show-details: never
+    gateway:
+      enabled: true 
+
+services:
+  user-service:
+    uri: ${USER_SERVICE_URI:http://localhost:8081}
+  order-service:
+    uri: ${ORDER_SERVICE_URI:http://localhost:8082}
