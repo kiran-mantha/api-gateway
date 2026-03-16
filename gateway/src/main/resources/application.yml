@@ -1,6 +1,12 @@
 server:
   port: 8080
 
+logging:
+  level:
+    root: INFO
+    com.gateway: DEBUG
+    com.gateway.filter: DEBUG
+
 spring:
   application:
     name: api-gateway
