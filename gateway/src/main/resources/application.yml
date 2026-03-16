@@ -21,6 +21,87 @@ spring:
       initial-size: 2
       max-size: 10
 
+  cloud:
+    gateway:
+      routes:
+        # Update your existing routes to include the circuit breaker filter
+
+        - id: user-service-route
+          uri: http://user-service:8081
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: userServiceCB
+                fallbackUri: forward:/fallback/user-service
+
+        - id: order-service-route
+          uri: http://order-service:8082
+          predicates:
+            - Path=/api/orders/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: orderServiceCB
+                fallbackUri: forward:/fallback/order-service
+
+        # Fallback route — handled by gateway itself
+        - id: fallback-route
+          uri: http://localhost:8080
+          predicates:
+            - Path=/fallback/**
+
+# Resilience4j circuit breaker configuration
+resilience4j:
+  circuitbreaker:
+    configs:
+      # Shared default config — both services inherit this
+      default:
+        # How many calls to sample when deciding to trip
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+
+        # Trip open if 50% of the last 10 calls failed
+        failure-rate-threshold: 50
+
+        # Also trip if 50% of calls are slow (> slow-call-duration-threshold)
+        slow-call-rate-threshold: 50
+        slow-call-duration-threshold: 3s
+
+        # Minimum calls before failure rate is calculated
+        # Prevents tripping on the very first failure
+        minimum-number-of-calls: 5
+
+        # How long to stay OPEN before moving to HALF-OPEN
+        wait-duration-in-open-state: 30s
+
+        # How many calls to allow through in HALF-OPEN state
+        permitted-number-of-calls-in-half-open-state: 3
+
+        # Move to HALF-OPEN automatically (don't wait for a request)
+        automatic-transition-from-open-to-half-open-enabled: true
+
+    instances:
+      userServiceCB:
+        base-config: default
+      orderServiceCB:
+        base-config: default
+        # Override for order service — stricter, business-critical
+        wait-duration-in-open-state: 20s
+
+  # Timeout config — how long gateway waits before counting as a failure
+  timelimiter:
+    configs:
+      default:
+        timeout-duration: 5s
+        cancel-running-future: true
+    instances:
+      userServiceCB:
+        base-config: default
+      orderServiceCB:
+        base-config: default
+
 # Expose health endpoint for Docker healthcheck
 management:
   endpoints:
@@ -31,7 +112,10 @@ management:
     health:
       show-details: never
     gateway:
-      enabled: true 
+      enabled: true
+  health:
+    circuitbreakers:
+      enabled: true
 
 services:
   gateway:

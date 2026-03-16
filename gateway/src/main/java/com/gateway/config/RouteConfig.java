@@ -38,6 +38,10 @@ public class RouteConfig {
                 .filters(f -> f
                     .addResponseHeader("X-Served-By", "user-service")
                     .addRequestHeader("X-Gateway-Request", "true")
+                    .circuitBreaker(config -> config
+                        .setName("userServiceCB")
+                        .setFallbackUri("forward:/fallback/user-service")
+                    )
                 )
                 .uri(userServiceUri)
             )
@@ -50,8 +54,21 @@ public class RouteConfig {
                 .filters(f -> f
                     .addResponseHeader("X-Served-By", "order-service")
                     .addRequestHeader("X-Gateway-Request", "true")
+                    .circuitBreaker(config -> config
+                        .setName("orderServiceCB")
+                        .setFallbackUri("forward:/fallback/order-service")
+                    )
                 )
                 .uri(orderServiceUri)
+            )
+
+            // Fallback route — gateway handles these internally
+            .route("fallback-route", r -> r
+                .path("/fallback/**")
+                .filters(f -> f
+                    .addResponseHeader("X-Fallback", "true")
+                )
+                .uri(gatewayUri)
             )
 
             .build();
