@@ -53,6 +53,8 @@ services:
       DB_HOST: postgres
       DB_USERNAME: gateway_user
       DB_PASSWORD: gateway_pass
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
       JWT_SECRET: my-super-secret-key-that-is-at-least-32-chars-long
       JWT_EXPIRY_MS: 3600000
     ports:

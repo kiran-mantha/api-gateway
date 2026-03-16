@@ -10,6 +10,7 @@ import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -28,6 +29,9 @@ import java.util.List;
 public class AuthFilter implements GlobalFilter, Ordered {
 
     private final JwtUtil jwtUtil;
+    private final ReactiveStringRedisTemplate redisTemplate;
+
+    private static final String BLACKLIST_PREFIX = "blacklist:jti:";
 
     private static final List<String> PUBLIC_PATHS = List.of(
         "/api/auth/login",
@@ -72,32 +76,43 @@ public class AuthFilter implements GlobalFilter, Ordered {
         try {
             Claims claims = jwtUtil.extractAllClaims(token);
 
-            // Token valid — forward user context to downstream services
-            // Services should NEVER trust client-sent X-User-* headers
-            // They should ONLY trust these headers added by the gateway
-            ServerHttpRequest mutatedRequest = request.mutate()
-                .header("X-User-Id",   claims.getSubject())
-                .header("X-User-Role", claims.get("role", String.class))
-                .header("X-User-Email",claims.get("email", String.class))
-                // Remove original Authorization header if downstream doesn't need it
-                // .header(HttpHeaders.AUTHORIZATION, "")
-                .build();
+            String jti = claims.getId();
 
-            log.debug("Auth passed for userId={} role={}",
-                claims.getSubject(), claims.get("role"));
+            // Check Redis blacklist before allowing the request
+            return redisTemplate.hasKey(BLACKLIST_PREFIX + jti)
+                .flatMap(isBlacklisted -> {
+                    if (Boolean.TRUE.equals(isBlacklisted)) {
+                        log.warn("Revoked token used jti={} path={}", jti, path);
+                        return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
+                            "Token has been revoked");
+                    }
 
-            return chain.filter(exchange.mutate().request(mutatedRequest).build());
+                    // Token clean — forward user context downstream
+                    ServerHttpRequest mutatedRequest = request.mutate()
+                        .header("X-User-Id",    claims.getSubject())
+                        .header("X-User-Role",  claims.get("role",  String.class))
+                        .header("X-User-Email", claims.get("email", String.class))
+                        .build();
+
+                    log.debug("Auth passed userId={} jti={}",
+                        claims.getSubject(), jti);
+
+                    return chain.filter(
+                        exchange.mutate().request(mutatedRequest).build());
+                });
 
         } catch (ExpiredJwtException e) {
-            log.warn("Expired JWT for path={}", path);
-            return rejectRequest(exchange, HttpStatus.UNAUTHORIZED, "Token has expired");
+            log.warn("Expired JWT path={}", path);
+            return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
+                "Token has expired");
 
         } catch (JwtException e) {
-            log.warn("Invalid JWT for path={}: {}", path, e.getMessage());
-            return rejectRequest(exchange, HttpStatus.UNAUTHORIZED, "Invalid token");
+            log.warn("Invalid JWT path={}: {}", path, e.getMessage());
+            return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
+                "Invalid token");
 
         } catch (Exception e) {
-            log.error("Unexpected auth error for path={}", path, e);
+            log.error("Unexpected auth error path={}", path, e);
             return rejectRequest(exchange, HttpStatus.INTERNAL_SERVER_ERROR,
                 "Authentication error");
         }
