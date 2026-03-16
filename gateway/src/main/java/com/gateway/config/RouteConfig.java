@@ -25,9 +25,9 @@ public class RouteConfig {
             .route("auth-route", r -> r
                 .path("/api/auth/**")
                 .filters(f -> f
-                    .addResponseHeader("X-Served-By", "gateway-auth")
+                    .addResponseHeader("X-Served-By", "user-service")
                 )
-                .uri("http://localhost:8080")
+                .uri(userServiceUri)
             )
 
             // ── User Service ──────────────────────────────────────

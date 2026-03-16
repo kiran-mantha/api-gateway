@@ -50,10 +50,18 @@ services:
     container_name: user-service
     environment:
       SERVER_PORT: 8081
+      DB_HOST: postgres
+      DB_USERNAME: gateway_user
+      DB_PASSWORD: gateway_pass
+      JWT_SECRET: my-super-secret-key-that-is-at-least-32-chars-long
+      JWT_EXPIRY_MS: 3600000
     ports:
       - "8081:8081"
     networks:
       - gateway-network
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/actuator/health"]
       interval: 15s
@@ -92,11 +100,11 @@ services:
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
       DB_HOST: postgres
-      DB_NAME: gateway_db
+      DB_NAME: gatewaydb
       SPRING_R2DBC_USERNAME: gateway_user
       SPRING_R2DBC_PASSWORD: gateway_pass
       JWT_SECRET: my-super-secret-key-that-is-at-least-32-chars-long
-      JWT_EXPIRATION: 3600000
+      JWT_EXPIRY_MS: 3600000
     networks:
       - gateway-network
     depends_on:

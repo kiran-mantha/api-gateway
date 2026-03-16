@@ -14,7 +14,7 @@ spring:
 
   # R2DBC (reactive PostgreSQL)
   r2dbc:
-    url: r2dbc:postgresql://${DB_HOST:localhost}:5432/${DB_NAME:gateway_db}
+    url: r2dbc:postgresql://${DB_HOST:localhost}:5432/${DB_NAME:gatewaydb}
     username: ${SPRING_R2DBC_USERNAME:postgres}
     password: ${SPRING_R2DBC_PASSWORD:root}
     pool:
@@ -42,5 +42,19 @@ services:
     uri: ${ORDER_SERVICE_URI:http://localhost:8082}
 
 jwt:
-  secret: ${JWT_SECRET:my-super-secret-key-that-is-at-least-32-chars}
-  expiration: ${JWT_EXPIRATION:3600000} # 1 hour in milliseconds
+  secret: ${JWT_SECRET:my-super-secret-key-that-is-at-least-32-chars-long}
+  expiration: ${JWT_EXPIRY_MS:3600000} # 1 hour in milliseconds
+
+rate-limit:
+  default-max-tokens: 60
+  default-refill-rate: 60
+  default-window-seconds: 60
+  roles:
+    ADMIN:
+      max-tokens: 1000
+      refill-rate: 1000
+      window-seconds: 60
+    USER:
+      max-tokens: 60
+      refill-rate: 60
+      window-seconds: 60
