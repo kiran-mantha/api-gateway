@@ -64,28 +64,25 @@ resilience4j:
     configs:
       # Shared default config — both services inherit this
       default:
-        # How many calls to sample when deciding to trip
         sliding-window-type: COUNT_BASED
         sliding-window-size: 10
-
-        # Trip open if 50% of the last 10 calls failed
         failure-rate-threshold: 50
-
-        # Also trip if 50% of calls are slow (> slow-call-duration-threshold)
         slow-call-rate-threshold: 50
         slow-call-duration-threshold: 3s
-
-        # Minimum calls before failure rate is calculated
-        # Prevents tripping on the very first failure
         minimum-number-of-calls: 5
-
-        # How long to stay OPEN before moving to HALF-OPEN
         wait-duration-in-open-state: 30s
-
-        # How many calls to allow through in HALF-OPEN state
         permitted-number-of-calls-in-half-open-state: 3
-
-        # Move to HALF-OPEN automatically (don't wait for a request)
+        automatic-transition-from-open-to-half-open-enabled: true
+      
+      redis:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 5          # smaller window, trip faster
+        failure-rate-threshold: 50      # trip at 50% failures
+        slow-call-rate-threshold: 40
+        slow-call-duration-threshold: 1s  # Redis should never be > 1s
+        minimum-number-of-calls: 5      # trip after 5 calls
+        wait-duration-in-open-state: 10s  # try to recover every 10s
+        permitted-number-of-calls-in-half-open-state: 2
         automatic-transition-from-open-to-half-open-enabled: true
 
     instances:
@@ -93,8 +90,9 @@ resilience4j:
         base-config: default
       orderServiceCB:
         base-config: default
-        # Override for order service — stricter, business-critical
         wait-duration-in-open-state: 20s
+      redisCB:
+        base-config: redis
 
   # Timeout config — how long gateway waits before counting as a failure
   timelimiter:

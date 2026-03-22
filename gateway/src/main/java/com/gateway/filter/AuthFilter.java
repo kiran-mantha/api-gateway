@@ -10,6 +10,10 @@ import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
 import org.springframework.core.io.buffer.DataBuffer;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -30,19 +34,19 @@ public class AuthFilter implements GlobalFilter, Ordered {
 
     private final JwtUtil jwtUtil;
     private final ReactiveStringRedisTemplate redisTemplate;
+    private final CircuitBreakerRegistry circuitBreakerRegistry;
 
     private static final String BLACKLIST_PREFIX = "blacklist:jti:";
 
     private static final List<String> PUBLIC_PATHS = List.of(
-        "/api/auth/login",
-        "/api/auth/register",
-        "/actuator"
-    );
+            "/api/auth/login",
+            "/api/auth/register",
+            "/actuator");
 
     // Filters run in order — auth must be FIRST (lowest order number)
     @Override
     public int getOrder() {
-        return -100;    // runs before rate limiting (-90) and logging (-80)
+        return -100; // runs before rate limiting (-90) and logging (-80)
     }
 
     @Override
@@ -60,7 +64,7 @@ public class AuthFilter implements GlobalFilter, Ordered {
         // Check Authorization header exists
         if (!request.getHeaders().containsKey(HttpHeaders.AUTHORIZATION)) {
             return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
-                "Missing Authorization header");
+                    "Missing Authorization header");
         }
 
         String authHeader = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
@@ -68,7 +72,7 @@ public class AuthFilter implements GlobalFilter, Ordered {
         // Check Bearer format
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
-                "Invalid Authorization format. Expected: Bearer <token>");
+                    "Invalid Authorization format. Expected: Bearer <token>");
         }
 
         String token = authHeader.substring(7); // strip "Bearer "
@@ -78,44 +82,65 @@ public class AuthFilter implements GlobalFilter, Ordered {
 
             String jti = claims.getId();
 
-            // Check Redis blacklist before allowing the request
+            // Check Redis blacklist with shared circuit breaker resilience
+            CircuitBreaker redisCB = circuitBreakerRegistry.circuitBreaker("redisCB");
+
             return redisTemplate.hasKey(BLACKLIST_PREFIX + jti)
-                .flatMap(isBlacklisted -> {
-                    if (Boolean.TRUE.equals(isBlacklisted)) {
-                        log.warn("Revoked token used jti={} path={}", jti, path);
-                        return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
-                            "Token has been revoked");
-                    }
+                    .transformDeferred(CircuitBreakerOperator.of(redisCB))
+                    .onErrorResume(ex -> {
+                        if (ex instanceof CallNotPermittedException) {
+                            log.debug("Redis CB open — skipping blacklist check for jti={}", jti);
+                            return Mono.just(false); // Fallback: not blacklisted
+                        }
 
-                    // Token clean — forward user context downstream
-                    ServerHttpRequest mutatedRequest = request.mutate()
-                        .header("X-User-Id",    claims.getSubject())
-                        .header("X-User-Role",  claims.get("role",  String.class))
-                        .header("X-User-Email", claims.get("email", String.class))
-                        .build();
+                        log.warn("Redis blacklist check failed [{}], failing open for jti={}",
+                                ex.getClass().getSimpleName(), jti);
+                        return Mono.just(false); // Fallback: not blacklisted
+                    })
+                    .flatMap(isBlacklisted -> {
+                        if (Boolean.TRUE.equals(isBlacklisted)) {
+                            log.warn("Revoked token used jti={} path={}", jti, path);
+                            return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
+                                    "Token has been revoked");
+                        }
 
-                    log.debug("Auth passed userId={} jti={}",
-                        claims.getSubject(), jti);
-
-                    return chain.filter(
-                        exchange.mutate().request(mutatedRequest).build());
-                });
-
+                        return proceedWithAuth(exchange, chain, request, path, claims, jti);
+                    });
         } catch (ExpiredJwtException e) {
             log.warn("Expired JWT path={}", path);
             return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
-                "Token has expired");
+                    "Token has expired");
 
         } catch (JwtException e) {
             log.warn("Invalid JWT path={}: {}", path, e.getMessage());
             return rejectRequest(exchange, HttpStatus.UNAUTHORIZED,
-                "Invalid token");
+                    "Invalid token");
 
         } catch (Exception e) {
             log.error("Unexpected auth error path={}", path, e);
             return rejectRequest(exchange, HttpStatus.INTERNAL_SERVER_ERROR,
-                "Authentication error");
+                    "Authentication error");
         }
+    }
+
+    private Mono<Void> proceedWithAuth(ServerWebExchange exchange,
+            GatewayFilterChain chain,
+            ServerHttpRequest request,
+            String path,
+            Claims claims,
+            String jti) {
+        // Token clean — forward user context downstream
+        ServerHttpRequest mutatedRequest = request.mutate()
+                .header("X-User-Id", claims.getSubject())
+                .header("X-User-Role", claims.get("role", String.class))
+                .header("X-User-Email", claims.get("email", String.class))
+                .build();
+
+        log.debug("Auth passed userId={} jti={}",
+                claims.getSubject(), jti);
+
+        return chain.filter(
+                exchange.mutate().request(mutatedRequest).build());
     }
 
     private boolean isPublicPath(String path) {
@@ -128,22 +153,22 @@ public class AuthFilter implements GlobalFilter, Ordered {
      * instead of throwing an exception — there is no servlet to catch it.
      */
     private Mono<Void> rejectRequest(ServerWebExchange exchange,
-                                      HttpStatus status,
-                                      String message) {
+            HttpStatus status,
+            String message) {
         ServerHttpResponse response = exchange.getResponse();
         response.setStatusCode(status);
         response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
 
         String body = """
-            {
-              "status": %d,
-              "error": "%s",
-              "message": "%s"
-            }
-            """.formatted(status.value(), status.getReasonPhrase(), message);
+                {
+                  "status": %d,
+                  "error": "%s",
+                  "message": "%s"
+                }
+                """.formatted(status.value(), status.getReasonPhrase(), message);
 
         DataBuffer buffer = response.bufferFactory()
-            .wrap(body.getBytes(StandardCharsets.UTF_8));
+                .wrap(body.getBytes(StandardCharsets.UTF_8));
 
         return response.writeWith(Mono.just(buffer));
     }

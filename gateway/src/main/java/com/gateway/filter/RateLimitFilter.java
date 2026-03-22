@@ -2,14 +2,18 @@ package com.gateway.filter;
 
 import com.gateway.config.RateLimitProperties;
 import com.gateway.config.RateLimitProperties.RoleLimit;
+import com.gateway.ratelimit.InMemoryRateLimiter;
+import com.gateway.ratelimit.RedisRateLimitExecutor;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
 import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
-import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpResponse;
@@ -18,79 +22,147 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class RateLimitFilter implements GlobalFilter, Ordered {
 
-    private final ReactiveStringRedisTemplate redisTemplate;
-    private final RedisScript<Long>           rateLimitScript;
-    private final RateLimitProperties         properties;
+    private final RedisRateLimitExecutor redisExecutor;
+    private final RateLimitProperties properties;
+    private final InMemoryRateLimiter inMemoryRateLimiter;
+    private final CircuitBreakerRegistry circuitBreakerRegistry;
 
-    @Override
-    public int getOrder() {
-        return -90;   // after AuthFilter(-100), before LoggingFilter(-80)
+    private CircuitBreaker redisCB;
+
+    @PostConstruct
+    public void init() {
+        redisCB = circuitBreakerRegistry.circuitBreaker("redisCB");
+
+        redisCB.getEventPublisher()
+                .onStateTransition(event -> {
+                    boolean isOpen = event.getStateTransition().getToState() == CircuitBreaker.State.OPEN;
+                    log.warn(
+                            "Redis CircuitBreaker: {} → {} | rate limiting via {}",
+                            event.getStateTransition().getFromState(),
+                            event.getStateTransition().getToState(),
+                            isOpen ? "IN-MEMORY FALLBACK" : "REDIS");
+                })
+                .onFailureRateExceeded(event -> log.warn(
+                        "Redis failure rate {}% — circuit will trip open",
+                        String.format("%.1f", event.getFailureRate())));
     }
 
     @Override
-    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        String userId = exchange.getRequest()
-                                .getHeaders()
-                                .getFirst("X-User-Id");
+    public int getOrder() {
+        return -90;
+    }
 
-        // No userId means AuthFilter let it through as public path
-        // Public paths are not rate limited
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange,
+            GatewayFilterChain chain) {
+
+        String userId = getHeaderOrDefault(exchange, "X-User-Id", null);
+
+        // Public path — no userId injected by AuthFilter
         if (userId == null) {
             return chain.filter(exchange);
         }
 
-        String role = exchange.getRequest()
-                              .getHeaders()
-                              .getFirst("X-User-Role");
+        String role = getHeaderOrDefault(exchange, "X-User-Role", "USER");
 
-        // Resolve limits for this user's role
-        RoleLimit limit = properties.getRoles()
-                                    .getOrDefault(role, defaultLimit());
+        RoleLimit limit = resolveLimit(role);
 
-        String bucketKey = "rate_limit:user:" + userId;
+        return redisExecutor
+                .executeRateLimit(
+                        "rate_limit:user:" + userId,
+                        limit.getMaxTokens(),
+                        limit.getRefillRate(),
+                        limit.getWindowSeconds())
+                // Wire through circuit breaker so failures are recorded
+                .transformDeferred(CircuitBreakerOperator.of(redisCB))
+                .flatMap(remaining -> {
+                    if (remaining < 0) {
+                        log.warn("Rate limit exceeded userId={} source=redis", userId);
+                        return rejectRequest(exchange, limit);
+                    }
+                    attachHeaders(exchange, limit, remaining, "redis");
+                    return chain.filter(exchange);
+                })
+                .onErrorResume(ex -> {
+                    if (ex instanceof io.github.resilience4j.circuitbreaker.CallNotPermittedException) {
+                        log.debug("Redis CB open — in-memory fallback for userId={}", userId);
+                        return applyInMemoryLimit(exchange, chain, userId, role, "in-memory-cb-open");
+                    }
 
-        List<String> keys = List.of(bucketKey);
-        List<String> args = List.of(
-            String.valueOf(limit.getMaxTokens()),
-            String.valueOf(limit.getRefillRate()),
-            String.valueOf(limit.getWindowSeconds()),
-            "1"   // tokens requested per call
-        );
+                    // This now reliably catches ALL Redis failures including
+                    // synchronous Lettuce connection exceptions
+                    log.warn("Redis failed [{}] — in-memory fallback for userId={}",
+                            ex.getClass().getSimpleName(), userId);
 
-        return redisTemplate
-            .execute(rateLimitScript, keys, args)
-            .next()   // script returns a single Long
-            .flatMap(remaining -> {
-                if (remaining < 0) {
-                    // Bucket empty — reject
-                    log.warn("Rate limit exceeded userId={} role={}", userId, role);
-                    return rejectRequest(exchange, limit);
+                    return applyInMemoryLimit(exchange, chain, userId, role,
+                            "in-memory-redis-error");
+                });
+    }
+
+    private Mono<Void> applyInMemoryLimit(ServerWebExchange exchange,
+            GatewayFilterChain chain,
+            String userId,
+            String role,
+            String source) {
+        RoleLimit limit = resolveLimit(role);
+        int remaining = inMemoryRateLimiter.tryConsume(userId, role);
+
+        if (remaining < 0) {
+            log.warn("Rate limit exceeded userId={} source={}", userId, source);
+            return rejectRequest(exchange, limit);
+        }
+
+        attachHeaders(exchange, limit, (long) remaining, source);
+        log.debug("Rate limit ok userId={} remaining={} source={}",
+                userId, remaining, source);
+        return chain.filter(exchange);
+    }
+
+    private void attachHeaders(ServerWebExchange exchange,
+            RoleLimit limit,
+            long remaining,
+            String source) {
+        exchange.getResponse().getHeaders()
+                .add("X-RateLimit-Limit", String.valueOf(limit.getMaxTokens()));
+        exchange.getResponse().getHeaders()
+                .add("X-RateLimit-Remaining", String.valueOf(remaining));
+        exchange.getResponse().getHeaders()
+                .add("X-RateLimit-Window", limit.getWindowSeconds() + "s");
+        exchange.getResponse().getHeaders()
+                .add("X-RateLimit-Source", source);
+    }
+
+    private Mono<Void> rejectRequest(ServerWebExchange exchange,
+            RoleLimit limit) {
+        ServerHttpResponse response = exchange.getResponse();
+        response.setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
+        response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+        response.getHeaders()
+                .add("Retry-After", String.valueOf(limit.getWindowSeconds()));
+
+        String body = """
+                {
+                  "status": 429,
+                  "error": "Too Many Requests",
+                  "message": "Rate limit exceeded. Retry after %d seconds."
                 }
+                """.formatted(limit.getWindowSeconds());
 
-                // Attach rate limit headers so clients can self-throttle
-                exchange.getResponse().getHeaders()
-                    .add("X-RateLimit-Limit",     String.valueOf(limit.getMaxTokens()));
-                exchange.getResponse().getHeaders()
-                    .add("X-RateLimit-Remaining", String.valueOf(remaining));
-                exchange.getResponse().getHeaders()
-                    .add("X-RateLimit-Window",    limit.getWindowSeconds() + "s");
+        DataBuffer buffer = response.bufferFactory()
+                .wrap(body.getBytes(StandardCharsets.UTF_8));
 
-                log.debug("Rate limit ok userId={} remaining={}", userId, remaining);
-                return chain.filter(exchange);
-            })
-            .onErrorResume(e -> {
-                // Redis is down — fail open (allow request) to avoid
-                // taking down the whole system because of a cache failure
-                log.error("Redis rate limit check failed, failing open: {}", e.getMessage());
-                return chain.filter(exchange);
-            });
+        return response.writeWith(Mono.just(buffer));
+    }
+
+    private RoleLimit resolveLimit(String role) {
+        return properties.getRoles()
+                .getOrDefault(role, defaultLimit());
     }
 
     private RoleLimit defaultLimit() {
@@ -101,24 +173,12 @@ public class RateLimitFilter implements GlobalFilter, Ordered {
         return limit;
     }
 
-    private Mono<Void> rejectRequest(ServerWebExchange exchange, RoleLimit limit) {
-        ServerHttpResponse response = exchange.getResponse();
-        response.setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
-        response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
-        response.getHeaders()
-                .add("Retry-After", String.valueOf(limit.getWindowSeconds()));
-
-        String body = """
-            {
-              "status": 429,
-              "error": "Too Many Requests",
-              "message": "Rate limit exceeded. Retry after %d seconds."
-            }
-            """.formatted(limit.getWindowSeconds());
-
-        DataBuffer buffer = response.bufferFactory()
-                .wrap(body.getBytes(StandardCharsets.UTF_8));
-
-        return response.writeWith(Mono.just(buffer));
+    private String getHeaderOrDefault(ServerWebExchange exchange,
+            String headerName,
+            String defaultValue) {
+        String value = exchange.getRequest()
+                .getHeaders()
+                .getFirst(headerName);
+        return (value != null && !value.isBlank()) ? value : defaultValue;
     }
 }
